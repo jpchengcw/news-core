@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
@@ -91,12 +92,26 @@ def dedup(items: list[NewsItem]) -> tuple[list[NewsItem], int]:
 # Persistent seen-hash store (per consumer)
 # ---------------------------------------------------------------------------
 class SeenStore:
-    """SQLite-backed seen-hash store. One DB file per consumer."""
+    """SQLite-backed seen-hash store. One DB file per consumer.
+
+    Thread-safe: the connection is opened with `check_same_thread=False` and
+    every read/write is wrapped in a lock. NewsClient is constructed in the
+    main thread but called from worker threads via the pm-pulse / deep-dive
+    per-ticker ThreadPoolExecutor — without this, mark_seen() and is_seen()
+    raise "SQLite objects created in a thread can only be used in that same
+    thread".
+    """
 
     def __init__(self, db_path: Path | str):
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.path))
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(
+            str(self.path),
+            check_same_thread=False,
+            isolation_level=None,
+        )
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS seen (
@@ -107,7 +122,6 @@ class SeenStore:
             )
             """
         )
-        self._conn.commit()
 
     @staticmethod
     def hash_item(item: NewsItem) -> str:
@@ -117,25 +131,27 @@ class SeenStore:
 
     def is_seen(self, item: NewsItem) -> bool:
         h = self.hash_item(item)
-        cur = self._conn.execute("SELECT 1 FROM seen WHERE hash = ?", (h,))
-        return cur.fetchone() is not None
+        with self._lock:
+            cur = self._conn.execute("SELECT 1 FROM seen WHERE hash = ?", (h,))
+            return cur.fetchone() is not None
 
     def mark_seen(self, item: NewsItem, ticker: str | None = None) -> None:
         h = self.hash_item(item)
-        self._conn.execute(
-            "INSERT OR IGNORE INTO seen(hash, first_seen, ticker, source_domain) VALUES (?,?,?,?)",
-            (h, datetime.now(timezone.utc).isoformat(), ticker, item.source_domain),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO seen(hash, first_seen, ticker, source_domain) VALUES (?,?,?,?)",
+                (h, datetime.now(timezone.utc).isoformat(), ticker, item.source_domain),
+            )
 
     def filter_unseen(self, items: list[NewsItem]) -> list[NewsItem]:
         return [it for it in items if not self.is_seen(it)]
 
     def prune_older_than(self, days: int = 60) -> int:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        cur = self._conn.execute("DELETE FROM seen WHERE first_seen < ?", (cutoff,))
-        self._conn.commit()
-        return cur.rowcount
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM seen WHERE first_seen < ?", (cutoff,))
+            return cur.rowcount
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
