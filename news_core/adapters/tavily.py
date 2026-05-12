@@ -12,7 +12,7 @@ import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from news_core.adapters._base import BaseAdapter, _Transient
+from news_core.adapters._base import AdapterError, BaseAdapter, _Transient
 from news_core.fetch import RawHit
 
 if TYPE_CHECKING:
@@ -92,8 +92,11 @@ class TavilyAdapter(BaseAdapter):
             msg = str(e).lower()
             if any(k in msg for k in ("timeout", "connection", "5", "rate")):
                 raise _Transient(f"tavily transient: {e}") from e
-            log.debug("tavily non-transient failure: %s", e)
-            return []
+            # Non-transient (e.g. 401 Unauthorized, malformed query, quota exhausted).
+            # Raise so _base.search() catches and returns [] WITHOUT recording the
+            # call against the Tavily $-budget. Previously this returned [] inline,
+            # which let _base.search() record_call() and burn cap on failed auth.
+            raise AdapterError(f"tavily non-transient: {e}") from e
 
         hits: list[RawHit] = []
         for r in resp.get("results", []):

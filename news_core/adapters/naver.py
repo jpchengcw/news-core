@@ -126,7 +126,10 @@ def _parse_naver_serp(html: str, lookback_hours: int) -> list[RawHit]:
             source_used="naver",
         ))
 
-    log.debug("naver parsed %d hits", len(out))
+    if not out:
+        log.warning("naver parsed 0 hits (selector drift?)")
+    else:
+        log.info("naver parsed %d hits", len(out))
     return out
 
 

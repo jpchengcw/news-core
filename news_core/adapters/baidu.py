@@ -5,10 +5,16 @@ structurally stable: each result block has an anchor with article URL + title,
 a description span, and a meta line with source + time. Anything we can't
 parse cleanly we drop — the downstream entity filter + tier scoring will
 re-validate via `match_source()`.
+
+CI note: GitHub-hosted runner IPs trigger Baidu's wappass captcha challenge
+on every request (302 → wappass.baidu.com), making this adapter useless from
+GHA. We short-circuit when GITHUB_ACTIONS=true to avoid wasting per-engine
+quota slots on guaranteed-zero calls.
 """
 from __future__ import annotations
 
 import logging
+import os
 import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -64,6 +70,9 @@ class BaiduAdapter(BaseAdapter):
         exclude_domains: list[str] | None,
     ) -> list[RawHit]:
         if locale not in ("zh-CN", "zh-HK"):
+            return []
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            log.info("baidu: skipping in GitHub Actions (captcha-blocked from GHA IPs)")
             return []
         url = (
             "https://www.baidu.com/s"
@@ -145,7 +154,12 @@ def _parse_baidu_serp(html: str, locale: str, lookback_hours: int) -> list[RawHi
             source_used="baidu",
         ))
 
-    log.debug("baidu parsed %d hits from %d blocks", len(out), len(blocks))
+    # Promote to WARNING when we got nothing — that's the signature of
+    # selector drift OR a captcha redirect, both of which want triage.
+    if not out:
+        log.warning("baidu parsed 0 hits from %d blocks (selector drift or captcha?)", len(blocks))
+    else:
+        log.info("baidu parsed %d hits from %d blocks", len(out), len(blocks))
     return out
 
 

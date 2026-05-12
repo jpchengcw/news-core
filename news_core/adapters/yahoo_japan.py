@@ -133,7 +133,10 @@ def _parse_yahoo_jp_serp(html: str, lookback_hours: int) -> list[RawHit]:
             source_used="yahoo_japan",
         ))
 
-    log.debug("yahoo_japan parsed %d hits", len(out))
+    if not out:
+        log.warning("yahoo_japan parsed 0 hits (selector drift or 403?)")
+    else:
+        log.info("yahoo_japan parsed %d hits", len(out))
     return out
 
 
